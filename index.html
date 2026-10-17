@@ -70,6 +70,7 @@
       <label>Options</label>
       <div class="checks">
         <label><input id="skipSeen" type="checkbox" checked /> Skip articles I've already downloaded</label>
+        <label><input id="withImages" type="checkbox" checked /> Include images</label>
       </div>
     </div>
   </div>
@@ -104,6 +105,12 @@ async function fetchText(url){
   const res = await fetch(PROXY + encodeURIComponent(url));
   if(!res.ok) throw new Error("Fetch failed ("+res.status+")");
   return res.text();
+}
+
+async function fetchBytes(url){
+  const res = await fetch(PROXY + encodeURIComponent(url));
+  if(!res.ok) throw new Error("image fetch failed ("+res.status+")");
+  return { buf: await res.arrayBuffer(), type: res.headers.get("Content-Type") || "" };
 }
 
 /* ---------- Feed parsing (RSS + Atom) ---------- */
@@ -156,14 +163,81 @@ async function getArticleHtml(it){
   return candidates.reduce((a, b) => textLen(b) > textLen(a) ? b : a);
 }
 
-/* ---------- Make content valid XHTML, strip media for a clean v1 ---------- */
-function cleanContent(htmlString){
+/* ---------- Image handling (fetch, filter ads/trackers, convert) ---------- */
+const AD_RE = /(doubleclick|googlesyndication|google-analytics|googletagmanager|scorecardresearch|quantserve|adservice|adsystem|adnxs|taboola|outbrain|criteo|facebook\.com\/tr|\/ads?[\/_.?-]|\/pixel|\/beacon|\/track(ing)?|1x1|spacer|blank\.gif)/i;
+
+function pickImageUrl(img, baseUrl){
+  let chosen = img.getAttribute("src") || img.getAttribute("data-src")
+    || img.getAttribute("data-lazy-src") || img.getAttribute("data-original") || "";
+  const srcset = img.getAttribute("srcset") || img.getAttribute("data-srcset") || "";
+  if((!chosen || /^data:|placeholder|blank|spacer|1x1/i.test(chosen)) && srcset){
+    // take the last (usually largest) candidate in the srcset
+    chosen = srcset.split(",").map(s => s.trim().split(/\s+/)[0]).filter(Boolean).pop() || chosen;
+  }
+  if(!chosen || chosen.startsWith("data:")) return null;
+  try { return new URL(chosen, baseUrl).toString(); } catch { return null; }
+}
+
+function isLikelyContentImage(img, url){
+  if(AD_RE.test(url)) return false;
+  const w = parseInt(img.getAttribute("width")) || 0;
+  const h = parseInt(img.getAttribute("height")) || 0;
+  if((w && w <= 2) || (h && h <= 2)) return false;      // tracking pixels
+  if(w && h && w < 32 && h < 32) return false;          // tiny icons/spacers
+  return true;
+}
+
+async function prepareImage(buf, contentType){
+  const type = (contentType || "").split(";")[0].trim().toLowerCase();
+  const asIs = { "image/jpeg":"jpg", "image/jpg":"jpg", "image/png":"png", "image/gif":"gif", "image/svg+xml":"svg" };
+  if(asIs[type]) return { data: buf, ext: asIs[type], mediaType: type === "image/jpg" ? "image/jpeg" : type };
+  // WebP / AVIF / unknown → convert to JPEG for e-reader compatibility
+  try {
+    const bmp = await createImageBitmap(new Blob([buf], { type: type || "image/*" }));
+    const canvas = document.createElement("canvas");
+    canvas.width = bmp.width; canvas.height = bmp.height;
+    canvas.getContext("2d").drawImage(bmp, 0, 0);
+    const out = await new Promise(r => canvas.toBlob(r, "image/jpeg", 0.85));
+    if(!out) return null;
+    return { data: await out.arrayBuffer(), ext: "jpg", mediaType: "image/jpeg" };
+  } catch(e){ return null; }
+}
+
+/* ---------- Make content valid XHTML (optionally embedding images) ---------- */
+async function processContent(htmlString, baseUrl, chapIndex, withImages){
   const doc = new DOMParser().parseFromString(htmlString || "", "text/html");
-  doc.querySelectorAll("script,style,iframe,img,picture,figure,video,audio,source,noscript,svg,form,button,input,link")
+  doc.querySelectorAll("script,style,iframe,video,audio,source,noscript,svg,form,button,input,link")
      .forEach(n => n.remove());
+  doc.querySelectorAll("picture").forEach(p => {           // flatten <picture> to its <img>
+    const im = p.querySelector("img");
+    if(im) p.replaceWith(im); else p.remove();
+  });
+
+  const images = [];
+  if(withImages){
+    let imgIdx = 0;
+    for(const img of [...doc.querySelectorAll("img")]){
+      const url = pickImageUrl(img, baseUrl);
+      if(!url || !isLikelyContentImage(img, url)){ img.remove(); continue; }
+      try {
+        const { buf, type } = await fetchBytes(url);
+        const prep = await prepareImage(buf, type);
+        if(!prep){ img.remove(); continue; }
+        const alt = img.getAttribute("alt") || "";
+        const name = `img/c${chapIndex}_${imgIdx++}.${prep.ext}`;
+        images.push({ name, mediaType: prep.mediaType, data: prep.data });
+        [...img.attributes].forEach(a => img.removeAttribute(a.name));
+        img.setAttribute("src", name);
+        if(alt) img.setAttribute("alt", alt);
+      } catch(e){ img.remove(); }
+    }
+  } else {
+    doc.querySelectorAll("img, figure").forEach(n => n.remove());
+  }
+
   const ser = new XMLSerializer();
   const inner = [...doc.body.childNodes].map(n => ser.serializeToString(n)).join("").trim();
-  return inner || "<p>(No readable content could be extracted.)</p>";
+  return { html: inner || "<p>(No readable content could be extracted.)</p>", images };
 }
 
 function chapterXhtml(title, inner){
@@ -197,6 +271,10 @@ async function buildEpub({ title, author, chapters }){
     manifest.push(`<item id="${id}" href="${file}" media-type="application/xhtml+xml"/>`);
     spine.push(`<itemref idref="${id}"/>`);
     nav.push(`<navPoint id="np${i+1}" playOrder="${i+1}"><navLabel><text>${esc(ch.title)}</text></navLabel><content src="${file}"/></navPoint>`);
+    (ch.images || []).forEach((im, j) => {
+      zip.file("OEBPS/" + im.name, im.data);
+      manifest.push(`<item id="img${i+1}_${j}" href="${im.name}" media-type="${im.mediaType}"/>`);
+    });
   });
 
   zip.file("OEBPS/content.opf",
@@ -254,6 +332,7 @@ async function run(){
   const maxCount = Math.max(0, parseInt($("count").value) || 0);
   const days = Math.max(0, parseInt($("days").value) || 0);
   const skipSeen = $("skipSeen").checked;
+  const withImages = $("withImages").checked;
 
   $("go").disabled = true; logEl.textContent = ""; logEl.style.display = "none"; status("Fetching feed…");
   try {
@@ -294,8 +373,10 @@ async function run(){
       let raw;
       try { raw = await getArticleHtml(it); }
       catch(e){ log(`  ! ${it.title} — ${e.message}`); raw = it.summary || it.feedHtml || ""; }
-      chapters[idx] = { guid: it.guid, title: it.title, html: cleanContent(raw) };
-      done++; status(`Fetched ${done}/${items.length}…`); log(`✓ ${it.title}`);
+      const { html, images } = await processContent(raw, it.link || feedUrl, idx, withImages);
+      chapters[idx] = { guid: it.guid, title: it.title, html, images };
+      done++; status(`Fetched ${done}/${items.length}…`);
+      log(`✓ ${it.title}${images.length ? ` (${images.length} image${images.length>1?"s":""})` : ""}`);
     });
 
     const got = chapters.filter(Boolean);
