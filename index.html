@@ -240,8 +240,7 @@ async function processContent(htmlString, baseUrl, chapIndex, withImages){
   return { html: inner || "<p>(No readable content could be extracted.)</p>", images };
 }
 
-function chapterXhtml(title, inner){
-  const STYLE_CSS = `body { font-family: Georgia, "Times New Roman", serif; line-height: 1.5; margin: 5% 6%; }
+const STYLE_CSS = `body { font-family: Georgia, "Times New Roman", serif; line-height: 1.5; margin: 5% 6%; }
 h1 { font-size: 1.5em; line-height: 1.25; margin: 0 0 0.75em; }
 p { margin: 0 0 1em; }
 img { max-width: 100%; height: auto; }
@@ -267,7 +266,6 @@ ${bodyInner}
 
 function chapterXhtml(title, inner){
   return pageXhtml(title, `<h1>${esc(title)}</h1>\n${inner}`);
-};
 }
 
 /* ---------- EPUB 2 builder (JSZip only) ---------- */
@@ -338,52 +336,6 @@ async function buildEpub({ title, author, chapters, front = false }){
   <guide>
     ${guide.join("\n    ")}
   </guide>` : ""}
-</package>`);
-
-  zip.file("OEBPS/toc.ncx",
-`<?xml version="1.0" encoding="UTF-8"?>
-<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-  <head><meta name="dtb:uid" content="${uid}"/></head>
-  <docTitle><text>${esc(title)}</text></docTitle>
-  <navMap>
-    ${nav.join("\n    ")}
-  </navMap>
-</ncx>`);
-
-  return zip.generateAsync({ type: "blob", mimeType: "application/epub+zip" });
-}
-
-  const uid = "urn:uuid:" + crypto.randomUUID();
-  const manifest = [], spine = [], nav = [];
-  chapters.forEach((ch, i) => {
-    const id = "ch" + (i+1), file = id + ".xhtml";
-    zip.file("OEBPS/" + file, chapterXhtml(ch.title, ch.html));
-    manifest.push(`<item id="${id}" href="${file}" media-type="application/xhtml+xml"/>`);
-    spine.push(`<itemref idref="${id}"/>`);
-    nav.push(`<navPoint id="np${i+1}" playOrder="${i+1}"><navLabel><text>${esc(ch.title)}</text></navLabel><content src="${file}"/></navPoint>`);
-    (ch.images || []).forEach((im, j) => {
-      zip.file("OEBPS/" + im.name, im.data);
-      manifest.push(`<item id="img${i+1}_${j}" href="${im.name}" media-type="${im.mediaType}"/>`);
-    });
-  });
-
-  zip.file("OEBPS/content.opf",
-`<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="bookid">${uid}</dc:identifier>
-    <dc:title>${esc(title)}</dc:title>
-    <dc:creator>${esc(author)}</dc:creator>
-    <dc:language>en</dc:language>
-    <dc:date>${new Date().toISOString().slice(0,10)}</dc:date>
-  </metadata>
-  <manifest>
-    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
-    ${manifest.join("\n    ")}
-  </manifest>
-  <spine toc="ncx">
-    ${spine.join("\n    ")}
-  </spine>
 </package>`);
 
   zip.file("OEBPS/toc.ncx",
@@ -472,7 +424,7 @@ async function run(){
     const got = chapters.filter(Boolean);
     status("Building EPUB…");
     if(mode === "combined"){
-            download(await buildEpub({ title: channelTitle, author: "RSS → EPUB", chapters: got, front: true }), safe(channelTitle) + ".epub");
+      download(await buildEpub({ title: channelTitle, author: "RSS → EPUB", chapters: got, front: true }), safe(channelTitle) + ".epub");
     } else {
       const zip = new JSZip();
       for(const ch of got){
