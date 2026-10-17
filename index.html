@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RSS → EPUB</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --ink:#1a1a1a; --muted:#6b6b6b; --line:#e3e3df; --accent:#2b6cb0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17171a; --card:#1f1f24; --ink:#ececea; --muted:#9a9a9a; --line:#33333a; --accent:#7fb3ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:720px; margin:0 auto; padding:32px 20px 64px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:18px; }
+  label { display:block; font-weight:600; margin:0 0 6px; font-size:14px; }
+  .hint { color:var(--muted); font-weight:400; font-size:13px; }
+  input[type=text], input[type=number] { width:100%; padding:10px 12px; border:1px solid var(--line);
+    border-radius:9px; background:transparent; color:var(--ink); font-size:15px; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; }
+  .row > div { flex:1; min-width:160px; }
+  .radios, .checks { display:flex; gap:18px; flex-wrap:wrap; margin-top:4px; }
+  .radios label, .checks label { font-weight:400; display:flex; align-items:center; gap:8px; margin:0; }
+  button { font:inherit; font-weight:600; border:0; border-radius:10px; padding:12px 20px; cursor:pointer; }
+  .go { background:var(--accent); color:#fff; }
+  .go:disabled { opacity:.5; cursor:default; }
+  .ghost { background:transparent; color:var(--muted); border:1px solid var(--line); padding:8px 14px; font-weight:400; }
+  .bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  #status { color:var(--muted); font-size:14px; }
+  #log { margin-top:14px; font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+    color:var(--muted); white-space:pre-wrap; max-height:260px; overflow:auto;
+    border-top:1px solid var(--line); padding-top:12px; display:none; }
+  mark { background:transparent; color:var(--ink); font-weight:600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>RSS → EPUB</h1>
+  <p class="sub">Turn an RSS/Atom feed into EPUB files for your e-ink reader.</p>
+
+  <div class="card">
+    <label for="feed">Feed URL</label>
+    <input id="feed" type="text" placeholder="https://example.com/feed.xml" autocomplete="off" />
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="count">Max articles <span class="hint">(0 = no limit)</span></label>
+        <input id="count" type="number" min="0" value="20" />
+      </div>
+      <div>
+        <label for="days">From the last … days <span class="hint">(0 = any time)</span></label>
+        <input id="days" type="number" min="0" value="0" />
+      </div>
+    </div>
+
+    <div style="margin-top:18px">
+      <label>Output</label>
+      <div class="radios">
+        <label><input type="radio" name="mode" value="combined" checked /> One combined EPUB</label>
+        <label><input type="radio" name="mode" value="individual" /> One EPUB per article (zipped)</label>
+      </div>
+    </div>
+
+    <div style="margin-top:18px">
+      <label>Options</label>
+      <div class="checks">
+        <label><input id="skipSeen" type="checkbox" checked /> Skip articles I've already downloaded</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="bar">
+    <button id="go" class="go">Generate</button>
+    <button id="reset" class="ghost" title="Forget which articles were already downloaded for this feed">Reset history</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="log"></div>
+</div>
+
+<script type="module">
+import JSZip from "https://esm.sh/jszip@3.10.1";
+import { Readability } from "https://esm.sh/@mozilla/readability@0.5.0";
+
+/* ----- Swap this one line for your Cloudflare Worker later ----- */
+const PROXY = "https://api.allorigins.win/raw?url=";
+/* --------------------------------------------------------------- */
+
+const $ = id => document.getElementById(id);
+const logEl = $("log");
+const statusEl = $("status");
+function status(t){ statusEl.textContent = t; }
+function log(t){ logEl.style.display = "block"; logEl.textContent += t + "\n"; logEl.scrollTop = logEl.scrollHeight; }
+
+const esc = s => (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+const safe = s => (s||"untitled").trim().replace(/[^\w\-]+/g,"_").replace(/^_+|_+$/g,"").slice(0,60) || "untitled";
+
+async function fetchText(url){
+  const res = await fetch(PROXY + encodeURIComponent(url));
+  if(!res.ok) throw new Error("Fetch failed ("+res.status+")");
+  return res.text();
+}
+
+/* ---------- Feed parsing (RSS + Atom) ---------- */
+function parseFeed(xmlText){
+  const xml = new DOMParser().parseFromString(xmlText, "application/xml");
+  if(xml.querySelector("parsererror")) throw new Error("Couldn't parse feed as XML.");
+  const channelTitle = (xml.querySelector("channel > title, feed > title")?.textContent || "Articles").trim();
+  const nodes = [...xml.querySelectorAll("item, entry")];
+  const items = nodes.map(n => {
+    const q = sel => n.querySelector(sel);
+    const title = (q("title")?.textContent || "Untitled").trim();
+    const links = [...n.querySelectorAll("link")];
+    const atom = links.find(l => l.getAttribute("href") && (l.getAttribute("rel")||"alternate") === "alternate");
+    const link = (atom?.getAttribute("href")
+      || n.querySelector("link")?.getAttribute("href")
+      || n.querySelector("link")?.textContent || "").trim();
+    const guid = (q("guid")?.textContent || q("id")?.textContent || link || title).trim();
+    const dateStr = q("pubDate")?.textContent || q("published")?.textContent
+      || q("updated")?.textContent || q("date")?.textContent || "";
+    const d = dateStr ? new Date(dateStr) : null;
+    const date = d && !isNaN(d) ? d : null;
+    const feedHtml = (n.getElementsByTagName("content:encoded")[0]?.textContent
+      || n.getElementsByTagName("content")[0]?.textContent || "").trim();
+    const summary = (q("description")?.textContent || q("summary")?.textContent || "").trim();
+    return { title, link, guid, date, feedHtml, summary };
+  });
+  return { channelTitle, items };
+}
+
+/* ---------- Full-text extraction ---------- */
+async function getArticleHtml(it){
+  if(it.feedHtml && it.feedHtml.length > 1200) return it.feedHtml; // feed already has the full piece
+  if(!it.link) return it.summary || it.feedHtml;
+  const doc = new DOMParser().parseFromString(await fetchText(it.link), "text/html");
+  const base = doc.createElement("base"); base.href = it.link; doc.head.appendChild(base);
+  const parsed = new Readability(doc).parse();
+  return (parsed && parsed.content) || it.feedHtml || it.summary || "";
+}
+
+/* ---------- Make content valid XHTML, strip media for a clean v1 ---------- */
+function cleanContent(htmlString){
+  const doc = new DOMParser().parseFromString(htmlString || "", "text/html");
+  doc.querySelectorAll("script,style,iframe,img,picture,figure,video,audio,source,noscript,svg,form,button,input,link")
+     .forEach(n => n.remove());
+  const ser = new XMLSerializer();
+  const inner = [...doc.body.childNodes].map(n => ser.serializeToString(n)).join("").trim();
+  return inner || "<p>(No readable content could be extracted.)</p>";
+}
+
+function chapterXhtml(title, inner){
+  return `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><meta charset="utf-8"/><title>${esc(title)}</title></head>
+<body><h1>${esc(title)}</h1>
+${inner}
+</body>
+</html>`;
+}
+
+/* ---------- EPUB 2 builder (JSZip only) ---------- */
+async function buildEpub({ title, author, chapters }){
+  const zip = new JSZip();
+  zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
+  zip.file("META-INF/container.xml",
+`<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`);
+
+  const uid = "urn:uuid:" + crypto.randomUUID();
+  const manifest = [], spine = [], nav = [];
+  chapters.forEach((ch, i) => {
+    const id = "ch" + (i+1), file = id + ".xhtml";
+    zip.file("OEBPS/" + file, chapterXhtml(ch.title, ch.html));
+    manifest.push(`<item id="${id}" href="${file}" media-type="application/xhtml+xml"/>`);
+    spine.push(`<itemref idref="${id}"/>`);
+    nav.push(`<navPoint id="np${i+1}" playOrder="${i+1}"><navLabel><text>${esc(ch.title)}</text></navLabel><content src="${file}"/></navPoint>`);
+  });
+
+  zip.file("OEBPS/content.opf",
+`<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">${uid}</dc:identifier>
+    <dc:title>${esc(title)}</dc:title>
+    <dc:creator>${esc(author)}</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:date>${new Date().toISOString().slice(0,10)}</dc:date>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    ${manifest.join("\n    ")}
+  </manifest>
+  <spine toc="ncx">
+    ${spine.join("\n    ")}
+  </spine>
+</package>`);
+
+  zip.file("OEBPS/toc.ncx",
+`<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="${uid}"/></head>
+  <docTitle><text>${esc(title)}</text></docTitle>
+  <navMap>
+    ${nav.join("\n    ")}
+  </navMap>
+</ncx>`);
+
+  return zip.generateAsync({ type: "blob", mimeType: "application/epub+zip" });
+}
+
+/* ---------- small concurrency pool, preserves order ---------- */
+async function pool(items, size, worker){
+  let i = 0;
+  const runners = Array.from({ length: Math.min(size, items.length) }, async () => {
+    while(i < items.length){ const idx = i++; await worker(items[idx], idx); }
+  });
+  await Promise.all(runners);
+}
+
+function download(blob, name){
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: name });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+/* ---------- main ---------- */
+async function run(){
+  const feedUrl = $("feed").value.trim();
+  if(!feedUrl){ status("Enter a feed URL first."); return; }
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  const maxCount = Math.max(0, parseInt($("count").value) || 0);
+  const days = Math.max(0, parseInt($("days").value) || 0);
+  const skipSeen = $("skipSeen").checked;
+
+  $("go").disabled = true; logEl.textContent = ""; logEl.style.display = "none"; status("Fetching feed…");
+  try {
+    const { channelTitle, items: all } = parseFeed(await fetchText(feedUrl));
+    log(`Found ${all.length} item(s) in “${channelTitle}”.`);
+
+    let items = all;
+    if(days > 0){
+      const cutoff = Date.now() - days*86400000;
+      items = items.filter(it => !it.date || it.date.getTime() >= cutoff);
+      log(`${items.length} within the last ${days} day(s).`);
+    }
+
+    const seenKey = "rss2epub:" + feedUrl;
+    const seen = new Set(JSON.parse(localStorage.getItem(seenKey) || "[]"));
+    if(skipSeen){
+      const before = items.length;
+      items = items.filter(it => !seen.has(it.guid));
+      log(`${before - items.length} already downloaded, skipping them.`);
+    }
+
+    if(maxCount > 0 && items.length > maxCount){ items = items.slice(0, maxCount); log(`Limiting to newest ${maxCount}.`); }
+
+    if(!items.length){ status("Nothing new to fetch after your filters."); $("go").disabled = false; return; }
+
+    status(`Fetching ${items.length} article(s)…`);
+    const chapters = new Array(items.length);
+    let done = 0;
+    await pool(items, 3, async (it, idx) => {
+      let raw;
+      try { raw = await getArticleHtml(it); }
+      catch(e){ log(`  ! ${it.title} — ${e.message}`); raw = it.summary || it.feedHtml || ""; }
+      chapters[idx] = { guid: it.guid, title: it.title, html: cleanContent(raw) };
+      done++; status(`Fetched ${done}/${items.length}…`); log(`✓ ${it.title}`);
+    });
+
+    const got = chapters.filter(Boolean);
+    status("Building EPUB…");
+    if(mode === "combined"){
+      download(await buildEpub({ title: channelTitle, author: "RSS → EPUB", chapters: got }), safe(channelTitle) + ".epub");
+    } else {
+      const zip = new JSZip();
+      for(const ch of got){
+        zip.file(safe(ch.title) + ".epub", await buildEpub({ title: ch.title, author: "RSS → EPUB", chapters: [ch] }));
+      }
+      download(await zip.generateAsync({ type: "blob" }), safe(channelTitle) + "-articles.zip");
+    }
+
+    if(skipSeen){
+      got.forEach(ch => seen.add(ch.guid));
+      localStorage.setItem(seenKey, JSON.stringify([...seen]));
+    }
+    status(`Done — ${got.length} article(s). Check your downloads.`);
+  } catch(e){
+    status("Error: " + e.message);
+    log("ERROR: " + e.message);
+  } finally {
+    $("go").disabled = false;
+  }
+}
+
+$("go").addEventListener("click", run);
+$("reset").addEventListener("click", () => {
+  const feedUrl = $("feed").value.trim();
+  if(!feedUrl){ status("Enter the feed URL whose history you want to reset."); return; }
+  localStorage.removeItem("rss2epub:" + feedUrl);
+  status("Download history cleared for this feed.");
+});
+</script>
+</body>
+</html>
