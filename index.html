@@ -87,9 +87,9 @@
 import JSZip from "https://esm.sh/jszip@3.10.1";
 import { Readability } from "https://esm.sh/@mozilla/readability@0.5.0";
 
-/* ----- Swap this one line for your Cloudflare Worker later ----- */
-const PROXY = "https://rss-proxy.beebe-rick.workers.dev/";
-/* --------------------------------------------------------------- */
+/* ----- ⬅️ PASTE YOUR WORKER URL below (keep the /?url= on the end) ----- */
+const PROXY = "https://rss-proxy.YOUR-SUBDOMAIN.workers.dev/?url=";
+/* ---------------------------------------------------------------------- */
 
 const $ = id => document.getElementById(id);
 const logEl = $("log");
@@ -154,7 +154,6 @@ async function getArticleHtml(it){
   const candidates = [fromPage, it.feedHtml, it.summary].filter(Boolean);
   if(!candidates.length) return "";
   return candidates.reduce((a, b) => textLen(b) > textLen(a) ? b : a);
-}
 }
 
 /* ---------- Make content valid XHTML, strip media for a clean v1 ---------- */
@@ -258,12 +257,7 @@ async function run(){
 
   $("go").disabled = true; logEl.textContent = ""; logEl.style.display = "none"; status("Fetching feed…");
   try {
-    const { channelTitle, items: all } = parseFeed(await fetchText(feedUrl));
-    log(`Found ${all.length} item(s) in “${channelTitle}”.`);
-
-    let items = all;
-    if(days > 0){
-          const xmlText = await fetchText(feedUrl);
+    const xmlText = await fetchText(feedUrl);
     let channelTitle, all;
     try {
       ({ channelTitle, items: all } = parseFeed(xmlText));
@@ -273,6 +267,12 @@ async function run(){
       throw e;
     }
     log(`Found ${all.length} item(s) in “${channelTitle}”.`);
+
+    let items = all;
+    if(days > 0){
+      const cutoff = Date.now() - days*86400000;
+      items = items.filter(it => !it.date || it.date.getTime() >= cutoff);
+      log(`${items.length} within the last ${days} day(s).`);
     }
 
     const seenKey = "rss2epub:" + feedUrl;
