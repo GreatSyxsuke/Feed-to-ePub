@@ -134,13 +134,27 @@ function parseFeed(xmlText){
 }
 
 /* ---------- Full-text extraction ---------- */
+function textLen(html){
+  const d = new DOMParser().parseFromString(html || "", "text/html");
+  return (d.body.textContent || "").trim().length;
+}
 async function getArticleHtml(it){
-  if(it.feedHtml && it.feedHtml.length > 1200) return it.feedHtml; // feed already has the full piece
-  if(!it.link) return it.summary || it.feedHtml;
-  const doc = new DOMParser().parseFromString(await fetchText(it.link), "text/html");
-  const base = doc.createElement("base"); base.href = it.link; doc.head.appendChild(base);
-  const parsed = new Readability(doc).parse();
-  return (parsed && parsed.content) || it.feedHtml || it.summary || "";
+  // Always try the full page first — many feeds only publish a truncated excerpt,
+  // even a long one, so we can't trust feed content by length alone.
+  let fromPage = "";
+  if(it.link){
+    try {
+      const doc = new DOMParser().parseFromString(await fetchText(it.link), "text/html");
+      const base = doc.createElement("base"); base.href = it.link; doc.head.appendChild(base);
+      const parsed = new Readability(doc).parse();
+      fromPage = (parsed && parsed.content) || "";
+    } catch(e){ /* fall back to feed content below */ }
+  }
+  // Use whichever source actually has the most text.
+  const candidates = [fromPage, it.feedHtml, it.summary].filter(Boolean);
+  if(!candidates.length) return "";
+  return candidates.reduce((a, b) => textLen(b) > textLen(a) ? b : a);
+}
 }
 
 /* ---------- Make content valid XHTML, strip media for a clean v1 ---------- */
@@ -249,9 +263,16 @@ async function run(){
 
     let items = all;
     if(days > 0){
-      const cutoff = Date.now() - days*86400000;
-      items = items.filter(it => !it.date || it.date.getTime() >= cutoff);
-      log(`${items.length} within the last ${days} day(s).`);
+          const xmlText = await fetchText(feedUrl);
+    let channelTitle, all;
+    try {
+      ({ channelTitle, items: all } = parseFeed(xmlText));
+    } catch(e){
+      log("The response didn't parse as a feed. First 300 chars received:");
+      log(xmlText.slice(0, 300).trim() || "(empty response)");
+      throw e;
+    }
+    log(`Found ${all.length} item(s) in “${channelTitle}”.`);
     }
 
     const seenKey = "rss2epub:" + feedUrl;
