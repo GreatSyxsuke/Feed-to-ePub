@@ -7,6 +7,7 @@ A single-page, client-side tool that turns any RSS or Atom feed into EPUB files 
 - **Full-text articles**, not just feed excerpts — fetches each article page and extracts the readable content with Mozilla's Readability.
 - **Combined or individual** output: one book with every article as a chapter, or a zip of separate EPUBs.
 - **Images included and cleaned up** — embeds article images directly in the EPUB, filters out ads/trackers and tracking pixels, handles lazy-loaded images, and converts WebP/AVIF to JPEG for broad e-reader compatibility. Can be turned off for fast, text-only books.
+- **Cleaner articles** — strips common end-of-article clutter: "Add as a preferred source on Google" / Google News promos, FTC affiliate disclosures, and author social-media follow lines (in-article product links are left intact).
 - **Cover + table of contents** in combined mode: a cover image (feed logo, or the first article's image, with a text title page as fallback), a title/metadata page, and a clickable Contents page, plus the reader's built-in navigation.
 - **Byline + source link** on each article — author and date when the feed provides them, plus a "Read original" link back to the source page.
 - **Fetch controls**: cap the number of articles, limit to the last _N_ days, and skip articles you've already downloaded (remembered per feed in your browser).
