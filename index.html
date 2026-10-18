@@ -250,6 +250,20 @@ async function processContent(htmlString, baseUrl, chapIndex, withImages){
     if(im) p.replaceWith(im); else p.remove();
   });
 
+  // Strip "Add as a preferred source on Google" / "Follow on Google News" promo blocks.
+  const JUNK_RE = /(add .{0,40}as a preferred source|preferred source on google|follow .{0,40}on google news|add us on google)/i;
+  doc.querySelectorAll("a, button, [role=link], [role=button]").forEach(el => {
+    if(!JUNK_RE.test(el.textContent || "")) return;
+    // Climb to the enclosing block if it's basically just this promo, then remove it.
+    let node = el, parent = el.parentElement;
+    for(let i = 0; i < 3 && parent && parent !== doc.body; i++){
+      if((parent.textContent || "").trim().length <= (el.textContent || "").trim().length + 40){
+        node = parent; parent = parent.parentElement;
+      } else break;
+    }
+    node.remove();
+  });
+
   const images = [];
   if(withImages){
     let imgIdx = 0;
