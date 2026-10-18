@@ -20,6 +20,10 @@
   .hint { color:var(--muted); font-weight:400; font-size:13px; }
   input[type=text], input[type=number] { width:100%; padding:10px 12px; border:1px solid var(--line);
     border-radius:9px; background:transparent; color:var(--ink); font-size:15px; }
+  select { padding:10px 12px; border:1px solid var(--line); border-radius:9px;
+    background:transparent; color:var(--ink); font-size:15px; }
+  .saved-row { display:flex; gap:8px; margin-top:10px; }
+  .saved-row select { flex:1; min-width:0; }
   .row { display:flex; gap:16px; flex-wrap:wrap; }
   .row > div { flex:1; min-width:160px; }
   .radios, .checks { display:flex; gap:18px; flex-wrap:wrap; margin-top:4px; }
@@ -44,6 +48,11 @@
   <div class="card">
     <label for="feed">Feed URL</label>
     <input id="feed" type="text" placeholder="https://example.com/feed.xml" autocomplete="off" />
+    <div class="saved-row">
+      <select id="saved"><option value="">Saved feeds…</option></select>
+      <button id="saveFeed" class="ghost" type="button">Save</button>
+      <button id="removeFeed" class="ghost" type="button">Remove</button>
+    </div>
   </div>
 
   <div class="card">
@@ -500,6 +509,39 @@ async function run(){
     $("go").disabled = false;
   }
 }
+
+/* ---------- saved feeds (localStorage) ---------- */
+const FEEDS_KEY = "rss2epub:feeds";
+function loadFeeds(){ try { return JSON.parse(localStorage.getItem(FEEDS_KEY) || "[]"); } catch { return []; } }
+function saveFeeds(list){ localStorage.setItem(FEEDS_KEY, JSON.stringify(list)); }
+function feedLabel(url){
+  try { const u = new URL(url); return u.hostname.replace(/^www\./, "") + (u.pathname !== "/" ? u.pathname : ""); }
+  catch { return url; }
+}
+function renderFeeds(selected){
+  const sel = $("saved");
+  const list = loadFeeds();
+  sel.innerHTML = '<option value="">Saved feeds…</option>' +
+    list.map(u => `<option value="${esc(u)}"${u === selected ? " selected" : ""}>${esc(feedLabel(u))}</option>`).join("");
+}
+
+$("saved").addEventListener("change", e => { if(e.target.value) $("feed").value = e.target.value; });
+$("saveFeed").addEventListener("click", () => {
+  const url = $("feed").value.trim();
+  if(!url){ status("Enter a feed URL to save."); return; }
+  const list = loadFeeds();
+  if(list.includes(url)){ status("That feed is already saved."); renderFeeds(url); return; }
+  list.push(url); saveFeeds(list); renderFeeds(url);
+  status("Feed saved.");
+});
+$("removeFeed").addEventListener("click", () => {
+  const url = $("saved").value || $("feed").value.trim();
+  if(!url){ status("Pick a saved feed to remove."); return; }
+  saveFeeds(loadFeeds().filter(u => u !== url));
+  renderFeeds();
+  status("Feed removed.");
+});
+renderFeeds();
 
 $("go").addEventListener("click", run);
 $("reset").addEventListener("click", () => {
