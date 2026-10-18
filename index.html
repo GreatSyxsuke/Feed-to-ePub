@@ -118,6 +118,10 @@ function parseFeed(xmlText){
   const xml = new DOMParser().parseFromString(xmlText, "application/xml");
   if(xml.querySelector("parsererror")) throw new Error("Couldn't parse feed as XML.");
   const channelTitle = (xml.querySelector("channel > title, feed > title")?.textContent || "Articles").trim();
+  const channelImage = (xml.querySelector("channel > image > url")?.textContent
+    || xml.getElementsByTagName("itunes:image")[0]?.getAttribute("href")
+    || xml.querySelector("feed > logo")?.textContent
+    || xml.querySelector("feed > icon")?.textContent || "").trim();
   const nodes = [...xml.querySelectorAll("item, entry")];
   const items = nodes.map(n => {
     const q = sel => n.querySelector(sel);
@@ -132,12 +136,18 @@ function parseFeed(xmlText){
       || q("updated")?.textContent || q("date")?.textContent || "";
     const d = dateStr ? new Date(dateStr) : null;
     const date = d && !isNaN(d) ? d : null;
+    let author = (n.getElementsByTagName("dc:creator")[0]?.textContent
+      || n.querySelector("author > name")?.textContent || "").trim();
+    if(!author){
+      const raw = (q("author")?.textContent || "").trim();
+      if(raw && !raw.includes("@")) author = raw;   // skip bare email-style authors
+    }
     const feedHtml = (n.getElementsByTagName("content:encoded")[0]?.textContent
       || n.getElementsByTagName("content")[0]?.textContent || "").trim();
     const summary = (q("description")?.textContent || q("summary")?.textContent || "").trim();
-    return { title, link, guid, date, feedHtml, summary };
+    return { title, link, guid, date, author, feedHtml, summary };
   });
-  return { channelTitle, items };
+  return { channelTitle, channelImage, items };
 }
 
 /* ---------- Full-text extraction ---------- */
@@ -203,6 +213,24 @@ async function prepareImage(buf, contentType){
   } catch(e){ return null; }
 }
 
+// Cover: prefer the feed's own logo/image, else the first embedded article image.
+async function getCoverImage(feedImageUrl, chapters){
+  if(feedImageUrl){
+    try {
+      const { buf, type } = await fetchBytes(new URL(feedImageUrl).toString());
+      const prep = await prepareImage(buf, type);
+      if(prep) return prep;
+    } catch(e){ /* fall through to article image */ }
+  }
+  for(const ch of chapters){
+    if(ch.images && ch.images.length){
+      const im = ch.images[0];
+      return { data: im.data, ext: im.name.split(".").pop(), mediaType: im.mediaType };
+    }
+  }
+  return null;
+}
+
 /* ---------- Make content valid XHTML (optionally embedding images) ---------- */
 async function processContent(htmlString, baseUrl, chapIndex, withImages){
   const doc = new DOMParser().parseFromString(htmlString || "", "text/html");
@@ -251,7 +279,10 @@ figcaption { font-size: 0.85em; color: #555; margin-top: 0.3em; }
 .cover-meta { color: #555; }
 ol.toc { padding-left: 1.2em; }
 ol.toc li { margin: 0.5em 0; }
-ol.toc a { text-decoration: none; }`;
+ol.toc a { text-decoration: none; }
+.byline { color: #555; font-style: italic; margin: 0 0 0.25em; }
+.source { margin: 0 0 1.5em; font-size: 0.9em; }
+.cover img { max-width: 70%; height: auto; display: block; margin: 10% auto 1em; }`;
 
 function pageXhtml(title, bodyInner){
   return `<?xml version="1.0" encoding="utf-8"?>
@@ -264,12 +295,21 @@ ${bodyInner}
 </html>`;
 }
 
-function chapterXhtml(title, inner){
-  return pageXhtml(title, `<h1>${esc(title)}</h1>\n${inner}`);
+function bylineHtml(ch){
+  const bits = [];
+  if(ch.author) bits.push(esc(ch.author));
+  if(ch.date) bits.push(esc(ch.date.toLocaleDateString(undefined, { year:"numeric", month:"long", day:"numeric" })));
+  const meta = bits.length ? `<p class="byline">${bits.join(" · ")}</p>` : "";
+  const src = ch.link ? `<p class="source"><a href="${esc(ch.link)}">Read original ↗</a></p>` : "";
+  return meta + src;
+}
+
+function chapterXhtml(ch){
+  return pageXhtml(ch.title, `<h1>${esc(ch.title)}</h1>\n${bylineHtml(ch)}\n${ch.html}`);
 }
 
 /* ---------- EPUB 2 builder (JSZip only) ---------- */
-async function buildEpub({ title, author, chapters, front = false }){
+async function buildEpub({ title, author, chapters, front = false, cover = null }){
   const zip = new JSZip();
   zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
   zip.file("META-INF/container.xml",
@@ -289,12 +329,25 @@ async function buildEpub({ title, author, chapters, front = false }){
   if(front){
     const date = new Date().toLocaleDateString(undefined, { year:"numeric", month:"long", day:"numeric" });
     const n = chapters.length;
-    zip.file("OEBPS/title.xhtml", pageXhtml(title,
-      `<div class="cover"><h1 class="cover-title">${esc(title)}</h1>
-      <p class="cover-meta">${n} article${n>1?"s":""} · ${esc(date)}</p></div>`));
-    manifest.push(`<item id="titlepage" href="title.xhtml" media-type="application/xhtml+xml"/>`);
-    spine.push(`<itemref idref="titlepage"/>`);
-    guide.push(`<reference type="cover" title="Title Page" href="title.xhtml"/>`);
+    const meta = `<p class="cover-meta">${n} article${n>1?"s":""} · ${esc(date)}</p>`;
+    if(cover){
+      zip.file("OEBPS/cover." + cover.ext, cover.data);
+      manifest.push(`<item id="cover-img" href="cover.${cover.ext}" media-type="${cover.mediaType}"/>`);
+      zip.file("OEBPS/cover.xhtml", pageXhtml(title,
+        `<div class="cover"><img src="cover.${cover.ext}" alt="${esc(title)}"/>
+      <h1 class="cover-title">${esc(title)}</h1>
+      ${meta}</div>`));
+      manifest.push(`<item id="coverpage" href="cover.xhtml" media-type="application/xhtml+xml"/>`);
+      spine.push(`<itemref idref="coverpage"/>`);
+      guide.push(`<reference type="cover" title="Cover" href="cover.xhtml"/>`);
+    } else {
+      zip.file("OEBPS/title.xhtml", pageXhtml(title,
+        `<div class="cover"><h1 class="cover-title">${esc(title)}</h1>
+      ${meta}</div>`));
+      manifest.push(`<item id="titlepage" href="title.xhtml" media-type="application/xhtml+xml"/>`);
+      spine.push(`<itemref idref="titlepage"/>`);
+      guide.push(`<reference type="cover" title="Title Page" href="title.xhtml"/>`);
+    }
 
     const tocLinks = chapters.map((ch, i) => `<li><a href="ch${i+1}.xhtml">${esc(ch.title)}</a></li>`).join("\n      ");
     zip.file("OEBPS/toc.xhtml", pageXhtml("Contents", `<h1>Contents</h1>\n<ol class="toc">\n      ${tocLinks}\n</ol>`));
@@ -306,7 +359,7 @@ async function buildEpub({ title, author, chapters, front = false }){
 
   chapters.forEach((ch, i) => {
     const id = "ch" + (i+1), file = id + ".xhtml";
-    zip.file("OEBPS/" + file, chapterXhtml(ch.title, ch.html));
+    zip.file("OEBPS/" + file, chapterXhtml(ch));
     manifest.push(`<item id="${id}" href="${file}" media-type="application/xhtml+xml"/>`);
     spine.push(`<itemref idref="${id}"/>`);
     nav.push(`<navPoint id="np${i+1}" playOrder="${play++}"><navLabel><text>${esc(ch.title)}</text></navLabel><content src="${file}"/></navPoint>`);
@@ -324,7 +377,8 @@ async function buildEpub({ title, author, chapters, front = false }){
     <dc:title>${esc(title)}</dc:title>
     <dc:creator>${esc(author)}</dc:creator>
     <dc:language>en</dc:language>
-    <dc:date>${new Date().toISOString().slice(0,10)}</dc:date>
+    <dc:date>${new Date().toISOString().slice(0,10)}</dc:date>${cover ? `
+    <meta name="cover" content="cover-img"/>` : ""}
   </metadata>
   <manifest>
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
@@ -379,9 +433,9 @@ async function run(){
   $("go").disabled = true; logEl.textContent = ""; logEl.style.display = "none"; status("Fetching feed…");
   try {
     const xmlText = await fetchText(feedUrl);
-    let channelTitle, all;
+    let channelTitle, channelImage, all;
     try {
-      ({ channelTitle, items: all } = parseFeed(xmlText));
+      ({ channelTitle, channelImage, items: all } = parseFeed(xmlText));
     } catch(e){
       log("The response didn't parse as a feed. First 300 chars received:");
       log(xmlText.slice(0, 300).trim() || "(empty response)");
@@ -416,7 +470,7 @@ async function run(){
       try { raw = await getArticleHtml(it); }
       catch(e){ log(`  ! ${it.title} — ${e.message}`); raw = it.summary || it.feedHtml || ""; }
       const { html, images } = await processContent(raw, it.link || feedUrl, idx, withImages);
-      chapters[idx] = { guid: it.guid, title: it.title, html, images };
+      chapters[idx] = { guid: it.guid, title: it.title, html, images, link: it.link, author: it.author, date: it.date };
       done++; status(`Fetched ${done}/${items.length}…`);
       log(`✓ ${it.title}${images.length ? ` (${images.length} image${images.length>1?"s":""})` : ""}`);
     });
@@ -424,7 +478,8 @@ async function run(){
     const got = chapters.filter(Boolean);
     status("Building EPUB…");
     if(mode === "combined"){
-      download(await buildEpub({ title: channelTitle, author: "RSS → EPUB", chapters: got, front: true }), safe(channelTitle) + ".epub");
+      const cover = await getCoverImage(channelImage, got);
+      download(await buildEpub({ title: channelTitle, author: "RSS → EPUB", chapters: got, front: true, cover }), safe(channelTitle) + ".epub");
     } else {
       const zip = new JSZip();
       for(const ch of got){
