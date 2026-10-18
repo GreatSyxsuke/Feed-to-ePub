@@ -266,6 +266,19 @@ async function processContent(htmlString, baseUrl, chapIndex, withImages){
     node.remove();
   });
 
+  // Trailing boilerplate: FTC affiliate disclosure + author "Follow me on social" line.
+  const FTC_RE = /income[- ]earning auto affiliate|ftc:\s*we use/i;
+  const SOCIAL_RE = /(x\.com|twitter\.com|bsky\.app|bluesky|instagram\.com|facebook\.com|threads\.net|mastodon|youtube\.com|youtu\.be|tiktok\.com|linkedin\.com)/i;
+  doc.querySelectorAll("p, div, small, aside, footer, em, i").forEach(el => {
+    const text = (el.textContent || "").trim();
+    if(!text) return;
+    const anchors = [...el.querySelectorAll("a")];
+    const isFtc = FTC_RE.test(text) && text.length < 300;
+    const isFollow = /^follow\b.{0,40}:/i.test(text) && anchors.length > 0
+      && anchors.every(a => SOCIAL_RE.test(a.getAttribute("href") || ""));
+    if(isFtc || isFollow) el.remove();
+  });
+
   const images = [];
   if(withImages){
     let imgIdx = 0;
