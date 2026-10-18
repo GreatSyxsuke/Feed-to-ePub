@@ -251,9 +251,11 @@ async function processContent(htmlString, baseUrl, chapIndex, withImages){
   });
 
   // Strip "Add as a preferred source on Google" / "Follow on Google News" promo blocks.
-  const JUNK_RE = /(add .{0,40}as a preferred source|preferred source on google|follow .{0,40}on google news|add us on google)/i;
+  const JUNK_TEXT = /(add .{0,40}as a preferred source|preferred source on google|follow .{0,40}on google news|add us on google)/i;
+  const JUNK_HREF = /google\.[^/]*\/preferences\/source|news\.google\.com\/.*preferred/i;
   doc.querySelectorAll("a, button, [role=link], [role=button]").forEach(el => {
-    if(!JUNK_RE.test(el.textContent || "")) return;
+    const href = el.getAttribute("href") || "";
+    if(!JUNK_TEXT.test(el.textContent || "") && !JUNK_HREF.test(href)) return;
     // Climb to the enclosing block if it's basically just this promo, then remove it.
     let node = el, parent = el.parentElement;
     for(let i = 0; i < 3 && parent && parent !== doc.body; i++){
