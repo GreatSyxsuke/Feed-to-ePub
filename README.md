@@ -1,4 +1,4 @@
-# Feed-to-ePub
+# RSS → EPUB
 
 A single-page, client-side tool that turns any RSS or Atom feed into EPUB files for reading on an e-ink device. Paste a feed URL, pick your options, and download either **one combined EPUB** of all articles or **one EPUB per article** (zipped). Everything runs in the browser — the only moving part is a tiny Cloudflare Worker that proxies the network requests.
 
@@ -7,8 +7,10 @@ A single-page, client-side tool that turns any RSS or Atom feed into EPUB files 
 - **Full-text articles**, not just feed excerpts — fetches each article page and extracts the readable content with Mozilla's Readability.
 - **Combined or individual** output: one book with every article as a chapter, or a zip of separate EPUBs.
 - **Images included and cleaned up** — embeds article images directly in the EPUB, filters out ads/trackers and tracking pixels, handles lazy-loaded images, and converts WebP/AVIF to JPEG for broad e-reader compatibility. Can be turned off for fast, text-only books.
-- **Cover + table of contents** in combined mode: a title page (feed name, article count, date) and a clickable Contents page, plus the reader's built-in navigation.
+- **Cover + table of contents** in combined mode: a cover image (feed logo, or the first article's image, with a text title page as fallback), a title/metadata page, and a clickable Contents page, plus the reader's built-in navigation.
+- **Byline + source link** on each article — author and date when the feed provides them, plus a "Read original" link back to the source page.
 - **Fetch controls**: cap the number of articles, limit to the last _N_ days, and skip articles you've already downloaded (remembered per feed in your browser).
+- **Saved feeds**: keep a dropdown of your regular feeds, remembered in the browser, so you never retype a URL.
 
 ## How it works
 
@@ -104,6 +106,8 @@ Commit, and you're done.
 
 **Skip already-downloaded** remembers article IDs per feed in `localStorage`, so repeat runs only grab new pieces. Use **Reset history** to clear that memory for the feed currently in the box.
 
+**Saved feeds** — click **Save** to add the current URL to the **Saved feeds…** dropdown (labeled by site name); pick one anytime to fill the box, or **Remove** to delete the selected feed. The list is stored in your browser.
+
 ## Transferring to your device
 
 EPUB is the standard e-ink format, so just copy the downloaded file to your reader like any other book (USB, or whatever method your device uses).
@@ -114,7 +118,7 @@ EPUB is the standard e-ink format, so just copy the downloaded file to your read
 - **Paywalled articles** only yield what a logged-out visitor would see.
 - **Image-heavy runs are slower**, since each image is a separate request through the Worker.
 - **The ad filter is good, not perfect** — a site serving ad images from its own domain with innocuous names could occasionally slip one through.
-- **Dedupe is per-browser** — running on a phone and a laptop keeps separate histories.
+- **Dedupe and saved feeds are per-browser** — running on a phone and a laptop keeps separate histories and feed lists.
 
 ## Hardening (optional)
 
